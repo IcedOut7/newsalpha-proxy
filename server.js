@@ -73,6 +73,41 @@ async function refreshAll() {
 app.get("/news", (req, res) => res.json(cache));
 app.get("/health", (req, res) => res.json({ ok: true, articles: cache.articles.length }));
  
+// ── Polymarket — топ активные рынки (публичный API, без ключа) ────────────────
+let polyCache = { markets: [], updatedAt: null };
+ 
+async function refreshPolymarket() {
+  try {
+    const res = await fetch(
+      "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=30&order=volume24hr&ascending=false",
+      { headers: { "User-Agent": "NewsAlpha/1.0" }, signal: AbortSignal.timeout(8000) }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    polyCache = {
+      markets: (data || []).map(m => ({
+        id: m.id,
+        question: m.question,
+        probability: m.outcomePrices ? parseFloat(JSON.parse(m.outcomePrices)[0]) : null,
+        volume24h: parseFloat(m.volume24hr || 0),
+        liquidity: parseFloat(m.liquidity || 0),
+        endDate: m.endDate,
+        url: `https://polymarket.com/event/${m.slug}`,
+      })),
+      updatedAt: new Date().toISOString(),
+    };
+    console.log(`[Polymarket] ✓ ${polyCache.markets.length} markets`);
+  } catch (e) {
+    console.warn(`[Polymarket] ✗ ${e.message}`);
+  }
+}
+ 
+app.get("/polymarket", (req, res) => res.json(polyCache));
+ 
+// Обновляем Polymarket каждые 2 минуты
+refreshPolymarket();
+setInterval(refreshPolymarket, 2 * 60 * 1000);
+ 
 // ── Anthropic proxy — чтобы не светить API ключ в браузере ───────────────────
 // ВАЖНО: добавь ANTHROPIC_API_KEY в Environment Variables на Render
 app.use(express.json());
@@ -247,9 +282,8 @@ function App(){
   const [q,setQ]=useState("");
   const [deepId,setDeepId]=useState(null);
   const [panel,setPanel]=useState({a:null,result:null});
-  const [customQ,setCustomQ]=useState("");
-  const [customRes,setCustomRes]=useState("");
-  const [customLoad,setCustomLoad]=useState(false);
+  const [polymarkets,setPolymarkets]=useState([]);
+  const [polyTab,setPolyTab]=useState(false);
   const seen=useRef(new Set());
   const queue=useRef([]);
   const scoring=useRef(false);
@@ -294,7 +328,11 @@ function App(){
   useEffect(()=>{
     fetchNews();
     const t=setInterval(fetchNews,REFRESH_MS);
-    return()=>clearInterval(t);
+    // Polymarket
+    const fetchPoly=()=>fetch("/polymarket").then(r=>r.json()).then(d=>setPolymarkets(d.markets||[])).catch(()=>{});
+    fetchPoly();
+    const p=setInterval(fetchPoly,2*60*1000);
+    return()=>{clearInterval(t);clearInterval(p);};
   },[]);
  
   const handleDeep=async(a)=>{
@@ -342,6 +380,38 @@ function App(){
           )
         ),
         React.createElement("button",{onClick:fetchNews,style:{background:"#111",border:"1px solid #222",borderRadius:4,color:"#666",fontSize:10,padding:"5px 10px",cursor:"pointer",fontFamily:"monospace"}},"↻")
+      )
+    ),
+    // polymarket bar
+    polymarkets.length>0 && React.createElement("div",{style:{borderBottom:"1px solid #0e0e0e",background:"#060606"}},
+      React.createElement("div",{
+        onClick:()=>setPolyTab(t=>!t),
+        style:{padding:"7px 18px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none"}
+      },
+        React.createElement("span",{style:{fontSize:9,color:"#32d74b",fontFamily:"monospace",letterSpacing:1}},`📊 POLYMARKET LIVE · ${polymarkets.length} MARKETS`),
+        React.createElement("span",{style:{fontSize:9,color:"#333",marginLeft:"auto",fontFamily:"monospace"}}),
+        React.createElement("span",{style:{fontSize:9,color:"#444",fontFamily:"monospace"}},polyTab?"▲ hide":"▼ show")
+      ),
+      polyTab && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:8,padding:"0 18px 12px"}},
+        polymarkets.slice(0,20).map(m=>
+          React.createElement("a",{
+            key:m.id, href:m.url, target:"_blank", rel:"noreferrer",
+            style:{display:"flex",flexDirection:"column",gap:3,background:"#0a0a0a",border:"1px solid #1a1a1a",borderRadius:6,padding:"8px 10px",width:220,textDecoration:"none",transition:"border-color .15s"},
+            onMouseEnter:e=>e.currentTarget.style.borderColor="#2a2a2a",
+            onMouseLeave:e=>e.currentTarget.style.borderColor="#1a1a1a",
+          },
+            React.createElement("div",{style:{fontSize:10,color:"#bbb",lineHeight:1.4,fontFamily:"monospace"}},m.question.slice(0,60)+(m.question.length>60?"…":"")),
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4}},
+              m.probability!==null && React.createElement("div",{style:{display:"flex",alignItems:"center",gap:5}},
+                React.createElement("div",{style:{width:50,height:3,background:"#1a1a1a",borderRadius:2,overflow:"hidden"}},
+                  React.createElement("div",{style:{width:(m.probability*100)+"%",height:"100%",background:m.probability>0.6?"#32d74b":m.probability>0.4?"#ff9f0a":"#ff453a",transition:"width .5s"}})
+                ),
+                React.createElement("span",{style:{fontSize:10,fontWeight:700,color:m.probability>0.6?"#32d74b":m.probability>0.4?"#ff9f0a":"#ff453a",fontFamily:"monospace"}},Math.round(m.probability*100)+"%")
+              ),
+              React.createElement("span",{style:{fontSize:9,color:"#333",fontFamily:"monospace"}},"$"+Math.round(m.volume24h/1000)+"k vol")
+            )
+          )
+        )
       )
     ),
     // filters
