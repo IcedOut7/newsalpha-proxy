@@ -191,7 +191,7 @@ async function scoreArticle(a){
     messages:[{role:"user",content:'Prediction market analyst. JSON only, no markdown:\n{"impact":"HIGH"|"MED"|"LOW","direction":"BUY"|"SELL"|"HOLD","confidence":<40-95>,"markets":["market1","market2"],"alpha":"one edge sentence"}\n\nHEADLINE: "' + a.title + '"\nSNIPPET: "' + a.description + '"'}]
   });
   const txt=d.content?.map(b=>b.text||"").join("")||"{}";
-  const cleaned = txt.replace(/[\u0060]{3}json|[\u0060]{3}/g,"").trim();
+  const cleaned = txt.replace(/\`\`\`json|\`\`\`/g,"").trim();
   return JSON.parse(cleaned);
 }
 
