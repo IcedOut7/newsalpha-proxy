@@ -197,10 +197,6 @@ function matchMarket(article, markets){
 }
 
 function MarketCard({m}){
-  if(!m) return e("div",{style:{
-    flex:"0 0 280px",padding:"16px",background:"#fafafa",border:"1px dashed #e5e5e7",borderRadius:12,
-    display:"flex",alignItems:"center",justifyContent:"center",color:"#a1a1a6",fontSize:12,minHeight:120
-  }},"No matching prediction");
   const prob = m.probability !== null ? Math.round(m.probability*100) : null;
   const probColor = prob === null ? "#86868b" : prob > 60 ? "#16a34a" : prob > 40 ? "#ea580c" : "#dc2626";
   return e("a",{
@@ -291,8 +287,8 @@ function App(){
     return true;
   }),[articles,cat,q]);
 
-  const matched = useMemo(()=>filtered.map(a=>({a, m:matchMarket(a,markets)})),[filtered,markets]);
-  const matchCount = matched.filter(x=>x.m).length;
+  const matched = useMemo(()=>filtered.map(a=>({a, m:matchMarket(a,markets)})).filter(x=>x.m),[filtered,markets]);
+  const totalCount = filtered.length;
 
   return e("div",{style:{minHeight:"100vh"}},
     e("header",{style:{
@@ -306,7 +302,7 @@ function App(){
           e("div",{style:{fontSize:11,color:"#86868b",marginTop:2}},
             status==="loading"?"Updating…":
             status==="error"?"Connection error":
-            "Live · "+filtered.length+" stories · "+matchCount+" predictions matched"
+            "Live · "+matched.length+" tradeable stories ("+totalCount+" scanned)"
           )
         ),
         e("div",{style:{flex:1}}),
@@ -343,8 +339,8 @@ function App(){
         e("button",{onClick:load,style:{color:"#0071e3",background:"none",border:"none",cursor:"pointer",fontSize:14}},"Retry")
       ),
       matched.map(({a,m})=>e(Row,{key:a.id,a,market:m})),
-      filtered.length===0 && status==="ok" && e("div",{style:{textAlign:"center",padding:60,color:"#86868b",fontSize:14}},
-        "No stories match your filters."
+      matched.length===0 && status==="ok" && e("div",{style:{textAlign:"center",padding:60,color:"#86868b",fontSize:14}},
+        totalCount===0 ? "No stories match your filters." : "No tradeable predictions found for current news. Refreshing every minute…"
       )
     )
   );
