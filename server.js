@@ -187,8 +187,8 @@ async function callAI(body){
 
 async function scoreArticle(a){
   const d=await callAI({
-    model:"claude-sonnet-4-20250514",max_tokens:200,
-    messages:[{role:"user",content:'Prediction market analyst. JSON only, no markdown:\n{"impact":"HIGH"|"MED"|"LOW","direction":"BUY"|"SELL"|"HOLD","confidence":<40-95>,"markets":["market1","market2"],"alpha":"one edge sentence"}\n\nHEADLINE: "' + a.title + '"\nSNIPPET: "' + a.description + '"'}]
+    model:"claude-sonnet-4-6",max_tokens:200,
+    messages:[{role:"user",content:'Prediction market analyst. JSON only, no markdown:\\n{"impact":"HIGH"|"MED"|"LOW","direction":"BUY"|"SELL"|"HOLD","confidence":<40-95>,"markets":["market1","market2"],"alpha":"one edge sentence"}\\n\\nHEADLINE: "' + a.title + '"\\nSNIPPET: "' + a.description + '"'}]
   });
   const txt=d.content?.map(b=>b.text||"").join("")||"{}";
   const cleaned = txt.replace(/\`\`\`json|\`\`\`/g,"").trim();
@@ -197,8 +197,8 @@ async function scoreArticle(a){
 
 async function deepDive(a){
   const d=await callAI({
-    model:"claude-sonnet-4-20250514",max_tokens:800,
-    messages:[{role:"user",content:"Expert Polymarket/Kalshi analyst. Concise.\n\nNEWS: " + a.title + "\nSOURCE: " + a.source + "\n" + a.description + "\n\n\u26a1 FIRST-MOVER WINDOW\n\ud83d\udcca MARKET IMPACT\n\ud83e\udde0 SIGNAL vs NOISE\n\u26a0\ufe0f TOP 2 RISKS\n\ud83c\udfaf TRADE CALL\n\ud83d\udd2e CONFIRM IN 24H"}]
+    model:"claude-sonnet-4-6",max_tokens:800,
+    messages:[{role:"user",content:"Expert Polymarket/Kalshi analyst. Concise.\\n\\nNEWS: " + a.title + "\\nSOURCE: " + a.source + "\\n" + a.description + "\\n\\n\u26a1 FIRST-MOVER WINDOW\\n\ud83d\udcca MARKET IMPACT\\n\ud83e\udde0 SIGNAL vs NOISE\\n\u26a0\ufe0f TOP 2 RISKS\\n\ud83c\udfaf TRADE CALL\\n\ud83d\udd2e CONFIRM IN 24H"}]
   });
   return d.content?.map(b=>b.text||"").join("")||"Error.";
 }
@@ -377,7 +377,7 @@ function App(){
     if(!customQ.trim()||customLoad)return;
     setCustomLoad(true);setCustomRes("");
     try{
-      const d=await callAI({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:"Ruthless Polymarket/Kalshi analyst:\n\n"+customQ}]});
+      const d=await callAI({model:"claude-sonnet-4-6",max_tokens:800,messages:[{role:"user",content:"Ruthless Polymarket/Kalshi analyst:\\n\\n"+customQ}]});
       setCustomRes(d.content?.map(b=>b.text||"").join("")||"Error.");
     }catch{setCustomRes("API error.");}
     setCustomLoad(false);
