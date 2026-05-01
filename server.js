@@ -90,7 +90,7 @@ async function refreshPolymarket() {
         volume24h: parseFloat(m.volume24hr || 0),
         liquidity: parseFloat(m.liquidity || 0),
         endDate: m.endDate,
-        url: "https://polymarket.com/event/" + m.slug,
+        url: "https://polymarket.com/event/" + ((m.events && m.events[0] && m.events[0].slug) || m.slug),
       })),
       updatedAt: new Date().toISOString(),
     };
