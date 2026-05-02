@@ -74,6 +74,18 @@ async function refreshNews() {
 // ── Polymarket Cache ──────────────────────────────────────────────────────────
 let polyCache = { markets: [], updatedAt: null };
 
+async function fetchHistory(tokenId) {
+  try {
+    const r = await fetch(
+      "https://clob.polymarket.com/prices-history?market=" + tokenId + "&interval=1w&fidelity=60",
+      { signal: AbortSignal.timeout(6000) }
+    );
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (d.history || []).map(p => ({ t: p.t * 1000, p: p.p }));
+  } catch { return []; }
+}
+
 async function refreshPolymarket() {
   try {
     const res = await fetch(
@@ -82,8 +94,10 @@ async function refreshPolymarket() {
     );
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
-    polyCache = {
-      markets: (data || []).map(m => ({
+    const base = (data || []).map(m => {
+      let yesToken = null;
+      try { yesToken = JSON.parse(m.clobTokenIds || "[]")[0] || null; } catch {}
+      return {
         id: m.id,
         question: m.question,
         probability: m.outcomePrices ? parseFloat(JSON.parse(m.outcomePrices)[0]) : null,
@@ -91,10 +105,20 @@ async function refreshPolymarket() {
         liquidity: parseFloat(m.liquidity || 0),
         endDate: m.endDate,
         url: "https://polymarket.com/event/" + ((m.events && m.events[0] && m.events[0].slug) || m.slug),
+        yesToken,
+      };
+    });
+    const histories = await Promise.allSettled(
+      base.map(m => m.yesToken ? fetchHistory(m.yesToken) : Promise.resolve([]))
+    );
+    polyCache = {
+      markets: base.map((m, i) => ({
+        ...m,
+        history: histories[i].status === "fulfilled" ? histories[i].value : [],
       })),
       updatedAt: new Date().toISOString(),
     };
-    console.log("[Polymarket] " + polyCache.markets.length + " markets");
+    console.log("[Polymarket] " + polyCache.markets.length + " markets, history points: " + polyCache.markets.reduce((s, m) => s + m.history.length, 0));
   } catch (e) {
     console.warn("[Polymarket] x " + e.message);
   }
@@ -196,28 +220,90 @@ function matchMarket(article, markets){
   return bestScore >= 2 ? best : null;
 }
 
-function MarketCard({m}){
+function priceAt(history, ts){
+  if(!history || !history.length) return null;
+  let best = history[0], bestDiff = Math.abs(history[0].t - ts);
+  for(const h of history){
+    const d = Math.abs(h.t - ts);
+    if(d < bestDiff){ bestDiff = d; best = h; }
+  }
+  return best.p;
+}
+
+function Sparkline({history, newsTs}){
+  if(!history || history.length < 2) return null;
+  const w = 100, h = 28;
+  const points = history.slice(-72);
+  const min = Math.min(...points.map(p=>p.p));
+  const max = Math.max(...points.map(p=>p.p));
+  const range = max - min || 1;
+  const t0 = points[0].t, t1 = points[points.length-1].t, tRange = t1-t0 || 1;
+  const path = points.map((p,i)=>{
+    const x = ((p.t - t0)/tRange)*w;
+    const y = h - ((p.p - min)/range)*h;
+    return (i===0?"M":"L")+x.toFixed(1)+","+y.toFixed(1);
+  }).join(" ");
+  const last = points[points.length-1].p;
+  const first = points[0].p;
+  const stroke = last > first ? "#16a34a" : last < first ? "#dc2626" : "#86868b";
+  const newsX = (newsTs && newsTs >= t0 && newsTs <= t1) ? ((newsTs - t0)/tRange)*w : null;
+  return e("svg",{viewBox:"0 0 "+w+" "+h, style:{width:"100%",height:h,display:"block"}},
+    newsX !== null && e("line",{x1:newsX,x2:newsX,y1:0,y2:h,stroke:"#0071e3",strokeWidth:1,strokeDasharray:"2,2",opacity:.6}),
+    e("path",{d:path,fill:"none",stroke,strokeWidth:1.5,strokeLinejoin:"round",strokeLinecap:"round"})
+  );
+}
+
+function Delta({label, value}){
+  if(value === null) return e("div",{style:{flex:1,minWidth:0}},
+    e("div",{style:{fontSize:9,color:"#a1a1a6",letterSpacing:.5,textTransform:"uppercase",fontWeight:600}},label),
+    e("div",{style:{fontSize:12,color:"#c7c7cc",fontWeight:600}},"–")
+  );
+  const up = value > 0;
+  const flat = Math.abs(value) < 0.5;
+  const color = flat ? "#86868b" : up ? "#16a34a" : "#dc2626";
+  const arrow = flat ? "→" : up ? "▲" : "▼";
+  const sign = value > 0 ? "+" : "";
+  return e("div",{style:{flex:1,minWidth:0}},
+    e("div",{style:{fontSize:9,color:"#86868b",letterSpacing:.5,textTransform:"uppercase",fontWeight:600}},label),
+    e("div",{style:{fontSize:12,color,fontWeight:700}},arrow+" "+sign+value.toFixed(1)+"pp")
+  );
+}
+
+function MarketCard({m, newsDate}){
   const prob = m.probability !== null ? Math.round(m.probability*100) : null;
   const probColor = prob === null ? "#86868b" : prob > 60 ? "#16a34a" : prob > 40 ? "#ea580c" : "#dc2626";
+  const newsTs = newsDate ? new Date(newsDate).getTime() : null;
+  const now = Date.now();
+  const hist = m.history || [];
+  const current = hist.length ? hist[hist.length-1].p : (m.probability||0);
+  const price24h = priceAt(hist, now - 24*3600*1000);
+  const priceNews = (newsTs && hist.length && newsTs >= hist[0].t) ? priceAt(hist, newsTs) : null;
+  const d24 = price24h !== null ? (current - price24h)*100 : null;
+  const dNews = priceNews !== null ? (current - priceNews)*100 : null;
   return e("a",{
     href:m.url,target:"_blank",rel:"noreferrer",
     style:{
-      flex:"0 0 280px",padding:"16px",background:"#fff",border:"1px solid #e5e5e7",borderRadius:12,
+      flex:"0 0 320px",padding:"14px 16px",background:"#fff",border:"1px solid #e5e5e7",borderRadius:12,
       display:"flex",flexDirection:"column",gap:10,transition:"all .15s",minHeight:120
     },
     onMouseEnter:ev=>{ev.currentTarget.style.borderColor="#0071e3";ev.currentTarget.style.transform="translateY(-1px)"},
     onMouseLeave:ev=>{ev.currentTarget.style.borderColor="#e5e5e7";ev.currentTarget.style.transform="none"}
   },
-    e("div",{style:{fontSize:10,color:"#86868b",letterSpacing:1,fontWeight:600,textTransform:"uppercase"}},"Polymarket"),
-    e("div",{style:{fontSize:13,color:"#1d1d1f",lineHeight:1.4,fontWeight:500,flex:1}},m.question),
-    e("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
-      prob !== null && e("div",{style:{display:"flex",alignItems:"center",gap:8,flex:1}},
-        e("div",{style:{flex:1,height:6,background:"#f0f0f0",borderRadius:3,overflow:"hidden"}},
-          e("div",{style:{width:prob+"%",height:"100%",background:probColor,transition:"width .8s"}})
-        ),
-        e("span",{style:{fontSize:14,fontWeight:700,color:probColor,minWidth:38,textAlign:"right"}},prob+"%")
-      ),
-      e("span",{style:{fontSize:11,color:"#86868b",fontWeight:500}},"$"+Math.round(m.volume24h/1000)+"k")
+    e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      e("div",{style:{fontSize:10,color:"#86868b",letterSpacing:1,fontWeight:600,textTransform:"uppercase"}},"Polymarket"),
+      e("div",{style:{fontSize:10,color:"#a1a1a6",fontWeight:500}},"$"+Math.round(m.volume24h/1000)+"k 24h vol")
+    ),
+    e("div",{style:{fontSize:13,color:"#1d1d1f",lineHeight:1.4,fontWeight:500}},m.question),
+    e("div",{style:{display:"flex",alignItems:"center",gap:10}},
+      prob !== null && e("span",{style:{fontSize:22,fontWeight:700,color:probColor,lineHeight:1}},prob+"%"),
+      e("div",{style:{flex:1,height:5,background:"#f0f0f0",borderRadius:3,overflow:"hidden"}},
+        e("div",{style:{width:prob+"%",height:"100%",background:probColor,transition:"width .8s"}})
+      )
+    ),
+    hist.length > 1 && e(Sparkline,{history:hist, newsTs}),
+    e("div",{style:{display:"flex",gap:8,paddingTop:4,borderTop:"1px solid #f0f0f0"}},
+      e(Delta,{label:"24h", value:d24}),
+      e(Delta,{label:"since news", value:dNews})
     )
   );
 }
@@ -246,7 +332,7 @@ function NewsCard({a}){
 function Row({a, market}){
   return e("div",{className:"row",style:{display:"flex",gap:12,marginBottom:12,alignItems:"stretch"}},
     e(NewsCard,{a}),
-    e(MarketCard,{m:market})
+    e(MarketCard,{m:market, newsDate:a.pubDate})
   );
 }
 
