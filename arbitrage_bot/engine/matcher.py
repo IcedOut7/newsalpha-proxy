@@ -167,6 +167,17 @@ def _score(ps_home: str, ps_away: str, kalshi_title: str) -> float:
     if not home_overlap or not away_overlap:
         return 0.0
 
+    # Strong match check: at least one token from each side should be a 'strong' identifier
+    # (not just a generic city name if the city has multiple teams)
+    # Actually, _expand_abbrevs already helps by bringing in team names.
+
+    # Avoid matching if home and away overlap with the SAME tokens in Kalshi (shouldn't happen with vs)
+    if home_overlap == away_overlap and len(home_overlap) == 1:
+        # Check if it's just a city name
+        token = list(home_overlap)[0]
+        if token in ("new", "york", "los", "angeles", "chicago"):
+            return 0.0
+
     ps_tokens = home_tokens | away_tokens
     return len(home_overlap | away_overlap) / max(len(ps_tokens), len(k_tokens_raw))
 

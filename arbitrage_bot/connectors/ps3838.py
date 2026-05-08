@@ -6,21 +6,22 @@ from ..config import PS3838_USERNAME, PS3838_PASSWORD, PS3838_BASE_URL
 
 logger = logging.getLogger(__name__)
 
-# PS3838 sport IDs
+# PS3838 sport IDs (Canonical)
 SPORT_IDS = {
     3:  "baseball",
     4:  "basketball",
-    5:  "football",
+    15: "football", # American Football
     6:  "boxing",
-    7:  "tennis",
+    33: "tennis",
     8:  "hockey",
-    9:  "soccer",
-    10: "tennis",
-    15: "rugby",
+    29: "soccer",
+    12: "rugby",
+    18: "volleyball",
+    10: "handball",
 }
 
-# Sports to monitor (subset with Kalshi coverage)
-ACTIVE_SPORT_IDS = [4, 33, 29, 3]  # basketball, tennis, soccer, baseball
+from ..config import SPORTS_TO_MONITOR
+ACTIVE_SPORT_IDS = SPORTS_TO_MONITOR
 
 
 def _auth_header() -> str:

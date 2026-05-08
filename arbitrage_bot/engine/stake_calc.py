@@ -69,9 +69,17 @@ def calculate_stakes(
         n -= 1
 
     if n > 0 and global_max_stake > 0:
-        max_n_global = max(int(global_max_stake / P), 0) if P > 0 else n
-        if n > max_n_global:
-            n = max_n_global
+        # global_max_stake is the maximum total spent on the arb
+        # S = n * P + n * imp_ps + fee_fn(n, P)
+        # We need to find max n such that total <= global_max_stake
+        max_n_global = n
+        while max_n_global > 0:
+            fee = fee_fn(max_n_global, P)
+            total = max_n_global * imp_ps + max_n_global * P + fee
+            if total <= global_max_stake:
+                break
+            max_n_global -= 1
+        n = min(n, max_n_global)
 
     capped  = False
     warning = None
@@ -79,8 +87,8 @@ def calculate_stakes(
         stake_ps_uncapped = n * imp_ps
         if stake_ps_uncapped > max_ps_stake:
             capped  = True
-            ratio   = max_ps_stake / stake_ps_uncapped
-            n       = max(int(n * ratio), 0)
+            # Adjust n down to respect max_ps_stake
+            n = max(int(max_ps_stake / imp_ps), 0) if imp_ps > 0 else n
             warning = f"PS3838 max bet ${max_ps_stake:.0f} — ставка уменьшена до лимита"
 
     if n <= 0:

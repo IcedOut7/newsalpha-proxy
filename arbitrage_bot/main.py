@@ -26,6 +26,7 @@ from .engine.matcher import find_best_kalshi_match, ABBREV_MAP
 from .engine.arb_detector import detect_arb
 from .engine.stake_calc import calculate_stakes
 from .engine.executor import execute_arb
+from .engine.notifier import TelegramNotifier
 from .bot_engine import scan_once
 
 logging.basicConfig(
@@ -40,6 +41,10 @@ KALSHI_REFRESH_EVERY = 30
 async def main():
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     logger.info("Арб-бот запущен [%s] | банкролл $%.0f", mode, BANKROLL)
+
+    notifier = TelegramNotifier()
+    await notifier.notify_startup(mode, BANKROLL)
+
     async with aiohttp.ClientSession() as session:
         ps     = PS3838Client(session)
         kalshi = KalshiClient(session)
@@ -73,6 +78,9 @@ async def main():
                             kalshi_client=kalshi, ps_client=ps,
                             dry_run=DRY_RUN,
                         )
+
+                        await notifier.notify_arb(result)
+
                         logger.info(
                             "ARB [%s] spent=$%.2f profit_est=$%.2f",
                             result.arb_id,

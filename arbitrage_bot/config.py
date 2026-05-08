@@ -13,7 +13,8 @@ KALSHI_BASE_URL = os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 # Sports to monitor (PS3838 sport IDs)
-SPORTS_TO_MONITOR = [1, 2, 8]  # Soccer, Basketball, Tennis
+# 29: Soccer, 4: Basketball, 33: Tennis, 3: Baseball
+SPORTS_TO_MONITOR = [29, 4, 33, 3]
 
 # Minimum arbitrage profit % to consider
 MIN_ARB_PROFIT_PCT = 0.5

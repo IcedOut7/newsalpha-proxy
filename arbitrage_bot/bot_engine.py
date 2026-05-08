@@ -388,6 +388,6 @@ async def scan_once(ps, kalshi_events: list, settings: dict = None, kalshi_clien
 
 
 def _guess_sport(sport_id: int) -> str:
-    _MAP = {1: "Soccer", 2: "Basketball", 3: "Baseball", 4: "Hockey",
-            5: "Football", 6: "Boxing", 7: "MMA", 8: "Tennis"}
+    _MAP = {29: "Soccer", 4: "Basketball", 3: "Baseball", 8: "Hockey",
+            15: "Football", 6: "Boxing", 7: "MMA", 33: "Tennis"}
     return _MAP.get(sport_id, "")
