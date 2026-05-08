@@ -1,0 +1,393 @@
+"""
+Core scanning logic — shared between CLI (main.py) and web UI (web_app.py).
+"""
+
+import re
+import logging
+from datetime import datetime
+from typing import Optional
+
+from .engine.matcher import find_best_kalshi_match, ABBREV_MAP
+from .engine.arb_detector import detect_arb
+from .engine.stake_calc import calculate_stakes
+
+logger = logging.getLogger(__name__)
+
+_odds_fingerprints: dict = {}
+_match_cache: dict = {}
+
+DEFAULT_SETTINGS = {
+    "bankroll": 1000.0,
+    "auto_execute": False,
+    "max_exec_stake": 2.0,
+    "exec_cooldown_sec": 0,
+    "min_profit_pct": 0.5,
+    "max_profit_pct_filter": 50.0,
+    "min_odds": 1.3,
+    "max_odds": 50.0,
+    "arb_lifetime_min_sec": 5,
+    "arb_lifetime_sec": 30,
+    "leg2_wait_sec": 20,
+    "max_loss_pct": -2.0,
+    "arb_quality_min": 1,
+    "max_identical_arbs_per_event": 3,
+    "max_uncovered_per_event": 1,
+    "poll_interval": 2,
+    "kalshi_refresh_every": 60,
+    "polymarket_enabled":   True,
+    "kalshi_enabled":       True,
+    "polymarket_min_stake": 1.0,
+    "enable_soccer_moneyline": True,
+    "enable_soccer_totals": True,
+    "enable_spreads": True,
+    "enable_totals": True,
+}
+
+_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _get_full_match_period(event: dict):
+    for p in event.get("periods", []):
+        if p["number"] == 0 and p.get("moneyline"):
+            return p
+    return None
+
+
+def _is_halftime(event: dict) -> bool:
+    score = event.get("live_score", {})
+    if not score:
+        return False
+    period = score.get("period", "")
+    sport_id = event.get("sport_id")
+
+    # Fixed: period '2' in soccer is usually the second half, not halftime.
+    # HT, Halftime, Half Time are the standard markers for the break.
+    p_lower = str(period).lower()
+    if sport_id == 29: # Soccer
+        return p_lower in ("ht", "halftime", "half time", "half")
+    return p_lower in ("ht", "halftime", "half time", "2", "half")
+
+
+def _kalshi_event_date(sub_title: str) -> Optional[datetime]:
+    m = re.search(r'\((\w+)\s+(\d+)\)', sub_title or "")
+    if not m:
+        return None
+    month_str, day_str = m.group(1).lower(), int(m.group(2))
+    month = _MONTH_MAP.get(month_str[:3])
+    if not month:
+        return None
+    today = datetime.now()
+    year = today.year if month >= today.month - 1 else today.year + 1
+    try:
+        return datetime(year, month, day_str)
+    except ValueError:
+        return None
+
+
+def _ps3838_event_date(starts: str) -> Optional[datetime]:
+    if not starts:
+        return None
+    try:
+        return datetime.fromisoformat(starts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _dates_match(ke: dict, ps_starts: str) -> bool:
+    k_date = _kalshi_event_date(ke.get("sub_title", ""))
+    if k_date is None:
+        return True
+    ps_date = _ps3838_event_date(ps_starts)
+    if ps_date is None:
+        return True
+    return k_date.date() == ps_date.date()
+
+
+def _odds_fingerprint(period: dict) -> str:
+    ml   = period.get("moneyline") or {}
+    tots = period.get("totals") or []
+    return f"{ml.get('home')},{ml.get('away')},{ml.get('draw')},{len(tots)}"
+
+
+def _kalshi_team_side(team_id: str, home: str, away: str):
+    tid = team_id.upper()
+    expanded_keywords = set()
+    if tid in ABBREV_MAP:
+        for alias in ABBREV_MAP[tid]:
+            for w in alias.upper().split():
+                expanded_keywords.add(w)
+    else:
+        expanded_keywords.add(tid)
+
+    def _matches(team_name: str) -> bool:
+        name_words = team_name.upper().split()
+        for kw in expanded_keywords:
+            for w in name_words:
+                if w.startswith(kw) or kw.startswith(w) and len(kw) >= 3:
+                    return True
+        return False
+
+    home_match = _matches(home)
+    away_match = _matches(away)
+    if home_match and not away_match:
+        return "home"
+    if away_match and not home_match:
+        return "away"
+    return None
+
+
+_SPORT_ID_MAP = {
+    "soccer": 29, "basketball": 4, "tennis": 33,
+    "baseball": 3, "hockey": 8, "amfootball": 15,
+    "rugby": 12, "volleyball": 18, "handball": 10,
+    "tabletennis": 20, "badminton": 7,
+}
+
+
+def _arb_ok(arb, min_profit, max_profit, min_odds, max_odds) -> bool:
+    return (
+        arb is not None
+        and min_profit <= arb.profit_pct <= max_profit
+        and min_odds  <= arb.ps3838_odds <= max_odds
+    )
+
+
+async def scan_once(ps, kalshi_events: list, settings: dict = None, kalshi_client=None) -> list:
+    global _odds_fingerprints, _match_cache
+    if settings is None:
+        settings = {}
+
+    bankroll          = settings.get("bankroll",              DEFAULT_SETTINGS["bankroll"])
+    min_profit        = settings.get("min_profit_pct",        DEFAULT_SETTINGS["min_profit_pct"])
+    max_profit        = settings.get("max_profit_pct_filter", DEFAULT_SETTINGS["max_profit_pct_filter"])
+    min_odds          = settings.get("min_odds",              DEFAULT_SETTINGS["min_odds"])
+    max_odds          = settings.get("max_odds",              DEFAULT_SETTINGS["max_odds"])
+    max_stake_global  = settings.get("max_stake",             0)
+    enable_soccer_ml  = settings.get("enable_soccer_moneyline", True)
+    enable_soccer_totals = settings.get("enable_soccer_totals", True)
+    enable_spreads    = settings.get("enable_spreads",          True)
+    enable_totals     = settings.get("enable_totals",           True)
+
+    disabled_ps_ids: set = set()
+    for sport_str, ps_id in _SPORT_ID_MAP.items():
+        sport_cfg = settings.get("sports_config", {}).get(sport_str, {})
+        if sport_cfg.get("enabled") is False:
+            disabled_ps_ids.add(ps_id)
+
+    ps_events = await ps.get_all_live_events()
+
+    ke_index = {}
+    for ke in kalshi_events:
+        ke_index[(ke["event_ticker"], ke["market_type"])] = ke
+
+    all_pairs = []
+    meta_set  = set()
+
+    for ps_event in ps_events:
+        if ps_event.get("sport_id") in disabled_ps_ids:
+            continue
+        period = _get_full_match_period(ps_event)
+        if not period:
+            continue
+
+        ev_id = ps_event["id"]
+        fp    = _odds_fingerprint(period)
+        odds_changed = _odds_fingerprints.get(ev_id) != fp
+        _odds_fingerprints[ev_id] = fp
+
+        if not odds_changed and ev_id in _match_cache:
+            matched_kes = [ke_index[k] for k in _match_cache[ev_id] if k in ke_index]
+        else:
+            home, away = ps_event["home"], ps_event["away"]
+            ps_starts  = ps_event.get("starts", "")
+            matched_kes = [
+                ke for ke in kalshi_events
+                if find_best_kalshi_match(home, away, [ke]) is not None
+                and _dates_match(ke, ps_starts)
+            ]
+            _match_cache[ev_id] = [(ke["event_ticker"], ke["market_type"]) for ke in matched_kes]
+
+        for ke in matched_kes:
+            all_pairs.append((ps_event, ke))
+            meta_set.add((ke["event_ticker"], ke["market_type"], ke.get("sport") == "soccer"))
+
+    if not all_pairs:
+        return []
+
+    fresh_prices = {}
+    if kalshi_client and meta_set:
+        fresh_prices = await kalshi_client.refresh_matched_prices(list(meta_set))
+
+    opportunities = []
+    seen_ps_events = {}
+
+    for ps_event, ke in all_pairs:
+        ev_id = ps_event["id"]
+        if ev_id not in seen_ps_events:
+            period = _get_full_match_period(ps_event)
+            ml     = period.get("moneyline", {}) if period else {}
+            seen_ps_events[ev_id] = (period, ml)
+        period, ml = seen_ps_events[ev_id]
+        if not period:
+            continue
+
+        home      = ps_event["home"]
+        away      = ps_event["away"]
+        sport_id  = ps_event["sport_id"]
+        is_soccer = (sport_id == 29)
+        halftime  = _is_halftime(ps_event) if is_soccer else False
+        home_odds = ml.get("home")
+        away_odds = ml.get("away")
+        draw_odds = ml.get("draw")
+
+        max_ml  = period.get("max_moneyline", 0) or 0
+        max_spr = period.get("max_spread",    0) or 0
+        max_tot = period.get("max_total",     0) or 0
+
+        mtype = ke["market_type"]
+        sport = ke.get("sport", "")
+
+        if mtype == "total_over" and sport == "soccer":
+            if not enable_soccer_totals or not halftime:
+                continue
+        if mtype == "spread" and not enable_spreads:
+            continue
+
+        effective_markets = fresh_prices.get(ke["event_ticker"], ke["markets"])
+
+        for k_market in effective_markets:
+            k_price = k_market["entry_price"]
+            k_type  = k_market["market_type"]
+            team_id = k_market["team_id"]
+
+            if k_price <= 0:
+                continue
+
+            if k_type == "moneyline":
+                if is_soccer and not enable_soccer_ml:
+                    continue
+
+                side = _kalshi_team_side(team_id, home, away)
+                if side is None:
+                    continue
+
+                ps_outcome, ps_odds = ("away", away_odds) if side == "home" else ("home", home_odds)
+                if not ps_odds:
+                    continue
+
+                if is_soccer and draw_odds:
+                    imp_draw = 1.0 / draw_odds
+                    imp_k    = k_price
+                    imp_ps   = 1.0 / ps_odds
+                    if imp_k + imp_ps + imp_draw >= 1.0:
+                        continue
+
+                arb = detect_arb(
+                    event_name=f"{home} vs {away}",
+                    ps3838_event_id=ps_event["id"],
+                    ps3838_sport_id=ps_event["sport_id"],
+                    ps3838_outcome=ps_outcome,
+                    ps3838_odds=ps_odds,
+                    ps3838_period=0,
+                    ps3838_bet_type="moneyline",
+                    kalshi_ticker=k_market["ticker"],
+                    kalshi_side="yes",
+                    kalshi_price=k_price,
+                )
+                if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                    stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_ml,
+                                             global_max_stake=max_stake_global)
+                    opportunities.append((arb, stakes, ke, k_market))
+
+            elif k_type == "draw" and draw_odds:
+                if not enable_soccer_ml:
+                    continue
+                arb = detect_arb(
+                    event_name=f"{home} vs {away}",
+                    ps3838_event_id=ps_event["id"],
+                    ps3838_sport_id=ps_event["sport_id"],
+                    ps3838_outcome="draw",
+                    ps3838_odds=draw_odds,
+                    ps3838_period=0,
+                    ps3838_bet_type="moneyline",
+                    kalshi_ticker=k_market["ticker"],
+                    kalshi_side="yes",
+                    kalshi_price=k_price,
+                )
+                if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                    stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_ml,
+                                             global_max_stake=max_stake_global)
+                    opportunities.append((arb, stakes, ke, k_market))
+
+            elif k_type == "total_under":
+                if not (k_market["is_soccer"] and halftime and enable_soccer_totals):
+                    continue
+                for t in period.get("totals", []):
+                    ps_over_odds = t.get("over")
+                    line = t.get("points")
+                    if not ps_over_odds or not line:
+                        continue
+                    try:
+                        k_line = float(k_market["team_id"])
+                    except ValueError:
+                        continue
+                    if abs(k_line - float(line)) > 0.6:
+                        continue
+                    arb = detect_arb(
+                        event_name=f"{home} vs {away} TOTAL {line} UNDER",
+                        ps3838_event_id=ps_event["id"],
+                        ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_outcome="over",
+                        ps3838_odds=ps_over_odds,
+                        ps3838_period=0,
+                        ps3838_bet_type="total",
+                        kalshi_ticker=k_market["ticker"],
+                        kalshi_side="no",
+                        kalshi_price=k_price,
+                    )
+                    if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                        stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_tot,
+                                                 global_max_stake=max_stake_global)
+                        opportunities.append((arb, stakes, ke, k_market))
+
+            elif k_type == "total_over":
+                if not enable_totals:
+                    continue
+                for t in period.get("totals", []):
+                    ps_under_odds = t.get("under")
+                    line = t.get("points")
+                    if not ps_under_odds or not line:
+                        continue
+                    try:
+                        k_line = float(team_id)
+                    except ValueError:
+                        continue
+                    if abs(k_line - float(line)) > 0.6:
+                        continue
+                    arb = detect_arb(
+                        event_name=f"{home} vs {away} TOTAL {line}",
+                        ps3838_event_id=ps_event["id"],
+                        ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_outcome="under",
+                        ps3838_odds=ps_under_odds,
+                        ps3838_period=0,
+                        ps3838_bet_type="total",
+                        kalshi_ticker=k_market["ticker"],
+                        kalshi_side="yes",
+                        kalshi_price=k_price,
+                    )
+                    if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                        stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_tot,
+                                                 global_max_stake=max_stake_global)
+                        opportunities.append((arb, stakes, ke, k_market))
+
+    return opportunities
+
+
+def _guess_sport(sport_id: int) -> str:
+    _MAP = {1: "Soccer", 2: "Basketball", 3: "Baseball", 4: "Hockey",
+            5: "Football", 6: "Boxing", 7: "MMA", 8: "Tennis"}
+    return _MAP.get(sport_id, "")

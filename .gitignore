@@ -1,2 +1,4 @@
 node_modules/
 server.log
+arbitrage_bot/**/__pycache__/
+arbitrage_bot/**/*.pyc
