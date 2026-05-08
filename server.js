@@ -1,15 +1,10 @@
 import express from "express";
 import Parser from "rss-parser";
+import cors from "cors";
 
 const app = express();
 
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
+app.use(cors());
 app.use(express.json());
 
 const parser = new Parser({
@@ -34,7 +29,7 @@ const SOURCES = [
 ];
 
 function stripHtml(str) {
-  return (str || "").replace(/<[^>]*>/g, "").replace(/&[a-z]+;/gi, " ").trim();
+  return (str || "").replace(/<[^>]*>/g, "").replace(/&[a-z]+;|&#\d+;/gi, " ").trim();
 }
 
 // ── RSS Cache ─────────────────────────────────────────────────────────────────
@@ -43,7 +38,7 @@ let newsCache = { articles: [], updatedAt: null };
 async function fetchSource(source) {
   const feed = await parser.parseURL(source.url);
   return (feed.items || []).slice(0, 8).map((item, i) => ({
-    id: source.id + "_" + i,
+    id: source.id + "_" + Buffer.from(item.link || item.guid || item.title || i.toString()).toString("base64").slice(-12),
     title: stripHtml(item.title || ""),
     description: stripHtml(item.contentSnippet || item.summary || "").slice(0, 300),
     link: item.link || item.guid || "",
@@ -61,12 +56,14 @@ async function refreshNews() {
     return [];
   });
   const seen = new Set();
-  const deduped = all.filter(a => {
-    const key = a.title.slice(0, 60).toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 80);
+  const deduped = all
+    .sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate))
+    .filter(a => {
+      const key = a.title.slice(0, 60).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 80);
   newsCache = { articles: deduped, updatedAt: new Date().toISOString() };
   console.log("[" + newsCache.updatedAt + "] news: " + newsCache.articles.length);
 }
@@ -96,15 +93,18 @@ async function refreshPolymarket() {
     const data = await res.json();
     const base = (data || []).map(m => {
       let yesToken = null;
-      try { yesToken = JSON.parse(m.clobTokenIds || "[]")[0] || null; } catch {}
+      try {
+        const tokens = typeof m.clobTokenIds === "string" ? JSON.parse(m.clobTokenIds || "[]") : (m.clobTokenIds || []);
+        yesToken = tokens[0] || null;
+      } catch {}
       return {
         id: m.id,
         question: m.question,
-        probability: m.outcomePrices ? parseFloat(JSON.parse(m.outcomePrices)[0]) : null,
+        probability: m.outcomePrices ? parseFloat((typeof m.outcomePrices === "string" ? JSON.parse(m.outcomePrices) : m.outcomePrices)[0]) : null,
         volume24h: parseFloat(m.volume24hr || 0),
         liquidity: parseFloat(m.liquidity || 0),
         endDate: m.endDate,
-        url: "https://polymarket.com/event/" + ((m.events && m.events[0] && m.events[0].slug) || m.slug),
+        url: "https://polymarket.com/event/" + (m.events?.[0]?.slug || m.slug),
         yesToken,
       };
     });
@@ -144,7 +144,7 @@ app.post("/ai", async (req, res) => {
       body: JSON.stringify(req.body),
     });
     const data = await response.json();
-    res.json(data);
+    res.status(response.status).json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -202,22 +202,25 @@ function timeAgo(d){
 }
 
 function tokens(str){
-  return (str||"").toLowerCase().replace(/[^a-z0-9\\s]/g," ").split(/\\s+/).filter(w=>w.length>3 && !STOP.has(w));
+  return (str||"").toLowerCase().replace(/[^a-z0-9'\s]/g," ").split(/\s+/).filter(w=>w.length>3 && !STOP.has(w));
 }
 
 function matchMarket(article, markets){
   if(!markets.length)return null;
-  const aTok = new Set(tokens(article.title + " " + (article.description||"")));
-  if(aTok.size === 0) return null;
+  const tTok = new Set(tokens(article.title));
+  const dTok = new Set(tokens(article.description));
   let best = null;
   let bestScore = 0;
   for(const m of markets){
     const mTok = tokens(m.question);
     let score = 0;
-    for(const t of mTok) if(aTok.has(t)) score++;
+    for(const t of mTok) {
+      if(tTok.has(t)) score += 2;
+      else if(dTok.has(t)) score += 1;
+    }
     if(score > bestScore){ bestScore = score; best = m; }
   }
-  return bestScore >= 2 ? best : null;
+  return bestScore >= 3 ? best : null;
 }
 
 function priceAt(history, ts){
@@ -347,10 +350,9 @@ function App(){
   const load = useCallback(async()=>{
     setStatus("loading");
     try{
-      const [n,p]=await Promise.all([
-        fetch("/news").then(r=>r.json()),
-        fetch("/polymarket").then(r=>r.json())
-      ]);
+      const [rn, rp] = await Promise.all([fetch("/news"), fetch("/polymarket")]);
+      if (!rn.ok || !rp.ok) throw new Error("Fetch failed");
+      const [n, p] = await Promise.all([rn.json(), rp.json()]);
       setArticles(n.articles||[]);
       setMarkets(p.markets||[]);
       setStatus("ok");
