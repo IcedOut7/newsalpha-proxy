@@ -22,6 +22,7 @@ import aiohttp
 from .config import PS3838_POLL_INTERVAL, DRY_RUN, BANKROLL, MAX_LEG_STAKE
 from .connectors.ps3838 import PS3838Client
 from .connectors.kalshi import KalshiClient
+from .connectors.polymarket import PolymarketClient
 from .engine.matcher import find_best_kalshi_match, ABBREV_MAP
 from .engine.arb_detector import detect_arb
 from .engine.stake_calc import calculate_stakes
@@ -48,27 +49,40 @@ async def main():
     async with aiohttp.ClientSession() as session:
         ps     = PS3838Client(session)
         kalshi = KalshiClient(session)
+        poly   = PolymarketClient(session)
 
         try:
             ps_bal = await ps.get_balance()
             k_bal  = await kalshi.get_balance()
-            logger.info("PS3838 $%.2f | Kalshi $%.2f",
-                        ps_bal.get("availableBalance", 0), k_bal.get("balance_usd", 0))
+            p_bal  = await poly.get_balance()
+            logger.info("PS3838 $%.2f | Kalshi $%.2f | Poly $%.2f",
+                        ps_bal.get("availableBalance", 0),
+                        k_bal.get("balance_usd", 0),
+                        p_bal.get("balance_usd", 0))
         except Exception as e:
             logger.error("Could not fetch balances: %s", e)
 
-        logger.info("Загружаю Kalshi markets…")
+        logger.info("Загружаю рынки Kalshi и Polymarket…")
         kalshi_events = await kalshi.get_all_sports_events()
+
+        poly_events = []
+        try:
+            poly_resp = await poly.get_markets()
+            poly_events = poly_resp.get("data", []) if isinstance(poly_resp, dict) else []
+        except Exception as e:
+            logger.warning("Polymarket load error: %s", e)
 
         iteration = 0
         while True:
             if iteration > 0 and iteration % KALSHI_REFRESH_EVERY == 0:
                 try:
                     kalshi_events = await kalshi.get_all_sports_events()
+                    poly_resp = await poly.get_markets()
+                    poly_events = poly_resp.get("data", []) if isinstance(poly_resp, dict) else []
                 except Exception as e:
-                    logger.warning("Kalshi refresh error: %s", e)
+                    logger.warning("Market refresh error: %s", e)
             try:
-                opps = await scan_once(ps, kalshi_events, kalshi_client=kalshi)
+                opps = await scan_once(ps, kalshi_events, poly_events=poly_events, kalshi_client=kalshi)
                 if opps:
                     for arb, stakes, ke, k_market in opps:
                         if stakes.kalshi_contracts <= 0:

@@ -27,3 +27,9 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
 
 BANKROLL = float(os.getenv("BANKROLL", "1000"))
 MAX_LEG_STAKE = float(os.getenv("MAX_LEG_STAKE", "2"))
+
+# Polymarket
+POLYMARKET_KEY = os.getenv("POLYMARKET_KEY")
+POLYMARKET_SECRET = os.getenv("POLYMARKET_SECRET")
+POLYMARKET_PASSPHRASE = os.getenv("POLYMARKET_PASSPHRASE")
+POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY")
