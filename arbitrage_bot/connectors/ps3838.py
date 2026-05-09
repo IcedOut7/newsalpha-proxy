@@ -43,20 +43,25 @@ class PS3838Client:
         self.base = PS3838_BASE_URL
 
     async def _get(self, path: str, params: dict = None, retries: int = 2) -> dict:
+        import time
+        start = time.time()
         for i in range(retries + 1):
             try:
                 async with self.session.get(
                     f"{self.base}{path}", headers=HEADERS, params=params or {}
                 ) as r:
                     r.raise_for_status()
+                    latency = (time.time() - start) * 1000
+                    logger.debug("PS3838 GET %s took %.2fms", path, latency)
                     text = await r.text()
                     if not text.strip():
                         return {}
                     return await r.json(content_type=None)
             except Exception as e:
                 if i == retries:
+                    logger.warning("PS3838 GET %s failed after %d retries: %s", path, retries, e)
                     raise
-                await asyncio.sleep(1 * (i + 1))
+                await asyncio.sleep(0.5 * (i + 1))
         return {}
 
     async def get_balance(self) -> dict:

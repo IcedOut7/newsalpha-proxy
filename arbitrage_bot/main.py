@@ -74,6 +74,7 @@ async def main():
 
         iteration = 0
         while True:
+            loop_start = asyncio.get_event_loop().time()
             if iteration > 0 and iteration % KALSHI_REFRESH_EVERY == 0:
                 try:
                     kalshi_events = await kalshi.get_all_sports_events()
@@ -86,8 +87,11 @@ async def main():
                     ps, kalshi_events, poly_events=poly_events,
                     kalshi_client=kalshi, poly_client=poly
                 )
+
+                elapsed = (asyncio.get_event_loop().time() - loop_start)
                 if iteration % 5 == 0:
-                    logger.info("Сканирование активно... [PS3838 Live Events OK]")
+                    logger.info("Сканирование активно (цикл %.2fs). PS3838 Live Events OK", elapsed)
+
                 if opps:
                     for arb, stakes, ke, k_market in opps:
                         if stakes.kalshi_contracts <= 0:

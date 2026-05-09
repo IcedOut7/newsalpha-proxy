@@ -183,9 +183,13 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
         if sport_cfg.get("enabled") is False:
             disabled_ps_ids.add(ps_id)
 
+    import time
+    scan_start = time.time()
     ps_events = await ps.get_all_live_events()
+    ps_load_time = (time.time() - scan_start) * 1000
+
     if not ps_events:
-        logger.debug("No live events found on PS3838")
+        logger.debug("No live events found on PS3838 (took %.2fms)", ps_load_time)
         return []
 
     ke_index = {}
@@ -256,8 +260,8 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
         logger.info("Сканирование завершено: 0 совпадений (проверено %d матчей PS3838)", len(ps_events))
         return []
 
-    logger.info("Найдено совпадений: Kalshi=%d, Poly=%d (проверено %d матчей PS3838)",
-                len(all_pairs), len(poly_matches), len(ps_events))
+    logger.info("Найдено совпадений: Kalshi=%d, Poly=%d (проверено %d матчей PS3838 за %.2fms)",
+                len(all_pairs), len(poly_matches), len(ps_events), ps_load_time)
 
     # Refresh prices for Kalshi
     fresh_prices = {}

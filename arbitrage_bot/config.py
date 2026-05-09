@@ -20,7 +20,7 @@ SPORTS_TO_MONITOR = [29, 4, 33, 3]
 MIN_ARB_PROFIT_PCT = 0.5
 
 # Poll interval for PS3838 in seconds
-PS3838_POLL_INTERVAL = 5
+PS3838_POLL_INTERVAL = 2
 
 # DRY_RUN=true  — только логируем, ничего не ставим
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
