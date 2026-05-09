@@ -42,15 +42,22 @@ class PS3838Client:
         self.session = session
         self.base = PS3838_BASE_URL
 
-    async def _get(self, path: str, params: dict = None) -> dict:
-        async with self.session.get(
-            f"{self.base}{path}", headers=HEADERS, params=params or {}
-        ) as r:
-            r.raise_for_status()
-            text = await r.text()
-            if not text.strip():
-                return {}
-            return await r.json(content_type=None)
+    async def _get(self, path: str, params: dict = None, retries: int = 2) -> dict:
+        for i in range(retries + 1):
+            try:
+                async with self.session.get(
+                    f"{self.base}{path}", headers=HEADERS, params=params or {}
+                ) as r:
+                    r.raise_for_status()
+                    text = await r.text()
+                    if not text.strip():
+                        return {}
+                    return await r.json(content_type=None)
+            except Exception as e:
+                if i == retries:
+                    raise
+                await asyncio.sleep(1 * (i + 1))
+        return {}
 
     async def get_balance(self) -> dict:
         return await self._get("/v1/client/balance")
@@ -110,14 +117,16 @@ class PS3838Client:
             for league in data.get("league", []):
                 league_name = league.get("name", "")
                 for event in league.get("events", []):
-                    result[event["id"]] = {
-                        "home": event.get("home", ""),
-                        "away": event.get("away", ""),
-                        "league": league_name,
-                        "league_id": league.get("id"),
-                        "starts": event.get("starts", ""),
-                        "live": event.get("liveScore", {}),
-                    }
+                    # Only include events that are truly live and accepting bets
+                    if event.get("status") == "O": # 'O' for Open
+                        result[event["id"]] = {
+                            "home": event.get("home", ""),
+                            "away": event.get("away", ""),
+                            "league": league_name,
+                            "league_id": league.get("id"),
+                            "starts": event.get("starts", ""),
+                            "live": event.get("liveScore", {}),
+                        }
             return result
 
         async def _fetch_odds():

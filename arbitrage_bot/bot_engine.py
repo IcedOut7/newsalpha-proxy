@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from .engine.matcher import find_best_kalshi_match, ABBREV_MAP
+from .engine.matcher import find_best_kalshi_match, ABBREV_MAP, _normalize
 from .engine.arb_detector import detect_arb
 from .engine.stake_calc import calculate_stakes, polymarket_taker_fee
 
@@ -63,12 +63,13 @@ def _is_halftime(event: dict) -> bool:
     period = score.get("period", "")
     sport_id = event.get("sport_id")
 
-    # Fixed: period '2' in soccer is usually the second half, not halftime.
-    # HT, Halftime, Half Time are the standard markers for the break.
     p_lower = str(period).lower()
+    # Broaden detection for various providers
+    ht_markers = {"ht", "halftime", "half time", "half", "intermission", "break", "45"}
+
     if sport_id == 29: # Soccer
-        return p_lower in ("ht", "halftime", "half time", "half")
-    return p_lower in ("ht", "halftime", "half time", "2", "half")
+        return p_lower in ht_markers
+    return p_lower in ht_markers or p_lower == "2"
 
 
 def _kalshi_event_date(sub_title: str) -> Optional[datetime]:
@@ -97,13 +98,16 @@ def _ps3838_event_date(starts: str) -> Optional[datetime]:
 
 
 def _dates_match(ke: dict, ps_starts: str) -> bool:
+    # Kalshi dates are often just day/month. PS3838 is full ISO.
+    # Strictness: matches must be within 24 hours of each other
     k_date = _kalshi_event_date(ke.get("sub_title", ""))
-    if k_date is None:
-        return True
     ps_date = _ps3838_event_date(ps_starts)
-    if ps_date is None:
-        return True
-    return k_date.date() == ps_date.date()
+
+    if k_date is None or ps_date is None:
+        return True # Fallback to name-only if dates missing
+
+    diff = abs((k_date - ps_date).total_seconds())
+    return diff < 86400 # 24 hours
 
 
 def _odds_fingerprint(period: dict) -> str:
@@ -155,7 +159,7 @@ def _arb_ok(arb, min_profit, max_profit, min_odds, max_odds) -> bool:
     )
 
 
-async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings: dict = None, kalshi_client=None) -> list:
+async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings: dict = None, kalshi_client=None, poly_client=None) -> list:
     global _odds_fingerprints, _match_cache
     if settings is None:
         settings = {}
@@ -180,14 +184,27 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
             disabled_ps_ids.add(ps_id)
 
     ps_events = await ps.get_all_live_events()
+    if not ps_events:
+        logger.debug("No live events found on PS3838")
+        return []
 
     ke_index = {}
+    ke_keyword_index = {}
     for ke in kalshi_events:
         ke_index[(ke["event_ticker"], ke["market_type"])] = ke
+        title_tokens = _normalize(ke.get("title", "") + " " + ke.get("sub_title", ""))
+        for token in title_tokens:
+            ke_keyword_index.setdefault(token, []).append(("kalshi", ke))
+
+    # Include Polymarket in keyword index
+    for pe in poly_events:
+        title_tokens = _normalize(pe.get("question", ""))
+        for token in title_tokens:
+            ke_keyword_index.setdefault(token, []).append(("poly", pe))
 
     all_pairs = []
     meta_set  = set()
-    opportunities = []
+    poly_matches = []
 
     for ps_event in ps_events:
         if ps_event.get("sport_id") in disabled_ps_ids:
@@ -199,68 +216,111 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
         ps_starts  = ps_event.get("starts", "")
         ml = period.get("moneyline", {})
         home_odds, away_odds = ml.get("home"), ml.get("away")
+        draw_odds = ml.get("draw")
 
         ev_id = ps_event["id"]
         fp    = _odds_fingerprint(period)
         odds_changed = _odds_fingerprints.get(ev_id) != fp
         _odds_fingerprints[ev_id] = fp
 
-        if not odds_changed and ev_id in _match_cache:
-            matched_kes = [ke_index[k] for k in _match_cache[ev_id] if k in ke_index]
-        else:
-            matched_kes = [
-                ke for ke in kalshi_events
-                if find_best_kalshi_match(home, away, [ke]) is not None
-                and _dates_match(ke, ps_starts)
-            ]
-            _match_cache[ev_id] = [(ke["event_ticker"], ke["market_type"]) for ke in matched_kes]
+        # Reset cache if odds changed or if it's been a while (placeholder for TTL)
+        if odds_changed or ev_id not in _match_cache:
+            home_tokens = _normalize(home)
+            away_tokens = _normalize(away)
+            candidates = set()
+            for t in (home_tokens | away_tokens):
+                if t in ke_keyword_index:
+                    candidates.update(ke_keyword_index[t])
 
-        for ke in matched_kes:
-            all_pairs.append((ps_event, ke))
-            meta_set.add((ke["event_ticker"], ke["market_type"], ke.get("sport") == "soccer"))
+            league = ps_event.get("league", "")
+            matches = []
+            for platform, item in candidates:
+                if platform == "kalshi":
+                    if find_best_kalshi_match(home, away, [item], ps_league=league) and _dates_match(item, ps_starts):
+                        matches.append(("kalshi", item))
+                else: # poly
+                    title = item.get("question", "")
+                    if find_best_kalshi_match(home, away, [{"title": title, "sub_title": ""}], min_score=0.45, ps_league=league):
+                        matches.append(("poly", item))
+            _match_cache[ev_id] = matches
 
-        # Polymarket Scanning within ps_event loop to ensure odds availability
-        if poly_events and home_odds and away_odds:
-            for pe in poly_events:
-                title = pe.get("question", "")
-                if find_best_kalshi_match(home, away, [{"title": title, "sub_title": ""}], min_score=0.45):
-                    for token in pe.get("tokens", []):
-                        p_price = token.get("price")
-                        if not p_price or p_price <= 0 or p_price >= 1: continue
+        matched_items = _match_cache[ev_id]
+        for platform, item in matched_items:
+            if platform == "kalshi":
+                all_pairs.append((ps_event, item))
+                meta_set.add((item["event_ticker"], item["market_type"], item.get("sport") == "soccer"))
+            elif platform == "poly" and home_odds and away_odds:
+                poly_matches.append((ps_event, item))
 
-                        outcome_name = token.get("outcome", "").lower()
-                        side = "home" if (outcome_name in home.lower() or home.lower() in outcome_name) else \
-                               "away" if (outcome_name in away.lower() or away.lower() in outcome_name) else None
+    if not all_pairs and not poly_matches:
+        logger.info("Сканирование завершено: 0 совпадений (проверено %d матчей PS3838)", len(ps_events))
+        return []
 
-                        if side:
-                            ps_outcome, ps_odds = ("away", away_odds) if side == "home" else ("home", home_odds)
-                            arb = detect_arb(
-                                event_name=f"{home} vs {away} (Poly)",
-                                ps3838_event_id=ps_event["id"],
-                                ps3838_sport_id=ps_event["sport_id"],
-                                ps3838_outcome=ps_outcome,
-                                ps3838_odds=ps_odds,
-                                ps3838_period=0,
-                                ps3838_bet_type="moneyline",
-                                kalshi_ticker=token.get("token_id", ""),
-                                kalshi_side="yes",
-                                kalshi_price=p_price,
-                            )
-                            if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
-                                s = calculate_stakes(arb, bankroll, max_ps_stake=period.get("max_moneyline", 0),
-                                                    global_max_stake=max_stake_global,
-                                                    fee_fn=polymarket_taker_fee)
-                                opportunities.append((arb, s, pe, token))
+    logger.info("Найдено совпадений: Kalshi=%d, Poly=%d (проверено %d матчей PS3838)",
+                len(all_pairs), len(poly_matches), len(ps_events))
 
-    if not all_pairs and not opportunities:
-        return opportunities
-
+    # Refresh prices for Kalshi
     fresh_prices = {}
     if kalshi_client and meta_set:
         fresh_prices = await kalshi_client.refresh_matched_prices(list(meta_set))
 
-    seen_ps_events = {}
+    opportunities = []
 
+    # Process Polymarket Arbs
+    if poly_client and poly_matches:
+        for ps_event, pe in poly_matches:
+            period = _get_full_match_period(ps_event)
+            ml = period.get("moneyline", {})
+            h_odds, a_odds = ml.get("home"), ml.get("away")
+            home, away = ps_event["home"], ps_event["away"]
+
+            for token in pe.get("tokens", []):
+                p_price = token.get("price")
+                if not p_price or p_price <= 0 or p_price >= 1: continue
+
+                # Verify price from orderbook for accuracy if it looks like an arb
+                outcome_name = token.get("outcome", "").lower()
+                side = "home" if (outcome_name in home.lower() or home.lower() in outcome_name) else \
+                       "away" if (outcome_name in away.lower() or away.lower() in outcome_name) else None
+
+                if side:
+                    ps_outcome, ps_odds = ("away", a_odds) if side == "home" else ("home", h_odds)
+                    arb = detect_arb(
+                        event_name=f"{home} vs {away} (Poly)",
+                        ps3838_event_id=ps_event["id"],
+                        ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_outcome=ps_outcome,
+                        ps3838_odds=ps_odds,
+                        ps3838_period=0,
+                        ps3838_bet_type="moneyline",
+                        kalshi_ticker=token.get("token_id", ""),
+                        kalshi_side="yes",
+                        kalshi_price=p_price,
+                    )
+                    if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                        # Re-verify price from CLOB orderbook to ensure it's not stale
+                        try:
+                            book = await poly_client.get_orderbook(token["token_id"])
+                            asks = book.get("asks", [])
+                            if asks:
+                                real_p_price = float(asks[0]["price"])
+                                arb.kalshi_price = real_p_price
+                                # Recalculate profit
+                                arb.implied_kalshi = real_p_price
+                                arb.margin = arb.implied_ps + real_p_price
+                                arb.profit_pct = (1.0 / arb.margin - 1.0) * 100.0
+
+                                if not _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                                    continue
+                        except Exception:
+                            continue
+
+                        s = calculate_stakes(arb, bankroll, max_ps_stake=period.get("max_moneyline", 0),
+                                            global_max_stake=max_stake_global,
+                                            fee_fn=polymarket_taker_fee)
+                        opportunities.append((arb, s, pe, token))
+
+    seen_ps_events = {}
     for ps_event, ke in all_pairs:
         ev_id = ps_event["id"]
         if ev_id not in seen_ps_events:
@@ -312,12 +372,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                     continue
 
                 if is_soccer and draw_odds:
-                    # In soccer, 'Yes' on Kalshi only wins if the team wins.
-                    # Hedging with the other team's moneyline on PS3838 ignores the Draw.
-                    # We MUST use 'No' on Kalshi (covers loss + draw) hedged with 'Win' on PS3838.
-
                     # 1. Check Arb: Kalshi NO (Team A doesn't win) vs PS3838 Team A Win
-                    # Kalshi NO price = 1.0 - yes_bid
                     k_no_price = k_market.get("no_ask")
                     ps_win_outcome, ps_win_odds = ("home", home_odds) if side == "home" else ("away", away_odds)
 
@@ -339,7 +394,29 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                                                      global_max_stake=max_stake_global)
                             opportunities.append((arb, stakes, ke, k_market))
 
-                    # Skip the 'Yes' side for soccer ML if draw is not covered
+                    # 2. Check Arb: Kalshi YES (Team wins) vs PS3838 Double Chance (Draw + Other Team)
+                    other_odds = away_odds if side == "home" else home_odds
+                    if draw_odds and other_odds:
+                        dc_prob = (1.0 / draw_odds) + (1.0 / other_odds)
+                        dc_odds = 1.0 / dc_prob
+
+                        arb = detect_arb(
+                            event_name=f"{home} vs {away} (K-YES vs PS-X2)",
+                            ps3838_event_id=ps_event["id"],
+                            ps3838_sport_id=ps_event["sport_id"],
+                            ps3838_outcome="draw_or_away" if side == "home" else "home_or_draw",
+                            ps3838_odds=dc_odds,
+                            ps3838_period=0,
+                            ps3838_bet_type="moneyline",
+                            kalshi_ticker=k_market["ticker"],
+                            kalshi_side="yes",
+                            kalshi_price=k_price,
+                        )
+                        if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                            stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_ml,
+                                                     global_max_stake=max_stake_global)
+                            opportunities.append((arb, stakes, ke, k_market))
+
                     continue
 
                 ps_outcome, ps_odds = ("away", away_odds) if side == "home" else ("home", home_odds)

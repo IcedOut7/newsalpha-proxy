@@ -36,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("arb_bot")
 
-KALSHI_REFRESH_EVERY = 30
+KALSHI_REFRESH_EVERY = 10 # More frequent market refresh
 
 
 async def main():
@@ -82,7 +82,12 @@ async def main():
                 except Exception as e:
                     logger.warning("Market refresh error: %s", e)
             try:
-                opps = await scan_once(ps, kalshi_events, poly_events=poly_events, kalshi_client=kalshi)
+                opps = await scan_once(
+                    ps, kalshi_events, poly_events=poly_events,
+                    kalshi_client=kalshi, poly_client=poly
+                )
+                if iteration % 5 == 0:
+                    logger.info("Сканирование активно... [PS3838 Live Events OK]")
                 if opps:
                     for arb, stakes, ke, k_market in opps:
                         if stakes.kalshi_contracts <= 0:
@@ -90,16 +95,21 @@ async def main():
                         result = await execute_arb(
                             arb=arb, stakes=stakes,
                             kalshi_client=kalshi, ps_client=ps,
+                            poly_client=poly,
                             dry_run=DRY_RUN,
                         )
 
                         await notifier.notify_arb(result)
 
                         logger.info(
-                            "ARB [%s] spent=$%.2f profit_est=$%.2f",
+                            "ARB [%s] spent=$%.2f profit_est=$%.2f (%.2f%%) | %s | PS Odds: %.3f, K Price: %.0f¢",
                             result.arb_id,
                             result.actual_kalshi_cost + (result.ps3838.cost if result.ps3838 else 0),
                             result.estimated_net_profit,
+                            result.estimated_profit_pct,
+                            result.event_name,
+                            arb.ps3838_odds,
+                            arb.kalshi_price * 100,
                         )
             except Exception as e:
                 logger.error("Scan error: %s", e, exc_info=True)

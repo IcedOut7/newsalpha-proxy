@@ -85,6 +85,7 @@ async def execute_arb(
     stakes: Stakes,
     kalshi_client,
     ps_client,
+    poly_client = None,
     fill_wait_sec: int = FILL_WAIT_SEC,
     min_fill_pct: float = MIN_FILL_PCT,
     dry_run: bool = False,
@@ -99,20 +100,30 @@ async def execute_arb(
 
     price_cents = round(arb.kalshi_price * 100)
 
-    # ── LEG 1: Kalshi ────────────────────────────────────────────────────────
+    # ── LEG 1: Execution ─────────────────────────────────────────────────────
+    # Use appropriate client based on ticker/platform
+    is_poly = len(str(arb.kalshi_ticker)) > 60 or "0x" in str(arb.kalshi_ticker)
+    platform = "polymarket" if is_poly else "kalshi"
+
     if dry_run:
         kalshi_leg = LegResult(
-            platform="kalshi", requested=stakes.kalshi_contracts,
+            platform=platform, requested=stakes.kalshi_contracts,
             filled=stakes.kalshi_contracts, fill_pct=1.0,
             avg_price=arb.kalshi_price, cost=stakes.kalshi_cost,
             order_id="DRY-RUN", status="filled",
         )
     else:
         try:
-            order = await kalshi_client.place_order(
-                ticker=arb.kalshi_ticker, side=arb.kalshi_side,
-                price_cents=price_cents, count=stakes.kalshi_contracts,
-            )
+            if is_poly:
+                # Placeholder for Poly placement (requires EIP-712)
+                status_str = "unfilled"
+                order = {"status": "POLY_LIVE_UNSUPPORTED"}
+                logger.error("[%s] Polymarket LIVE execution not implemented", arb_id)
+            else:
+                order = await kalshi_client.place_order(
+                    ticker=arb.kalshi_ticker, side=arb.kalshi_side,
+                    price_cents=price_cents, count=stakes.kalshi_contracts,
+                )
             order_id = order.get("order_id") or order.get("id")
             logger.info("[%s] Kalshi order placed: %s", arb_id, order_id)
 
@@ -183,12 +194,25 @@ async def execute_arb(
         )
     else:
         try:
-            result = await ps_client.place_bet(
-                event_id=arb.ps3838_event_id, period=arb.ps3838_period,
-                bet_type=arb.ps3838_bet_type, outcome=arb.ps3838_outcome,
-                price=arb.ps3838_odds, stake=adjusted_ps_stake, unique_id=arb_id,
-                sport_id=arb.ps3838_sport_id
-            )
+            # Handle Double Chance synthetic bet (placed as two separate bets)
+            if arb.ps3838_outcome in ("draw_or_away", "home_or_draw"):
+                # Simplified: we just place two bets. In production, we'd need more complex
+                # error handling if one fails but the other succeeds.
+                outcomes = ["draw", "away"] if arb.ps3838_outcome == "draw_or_away" else ["home", "draw"]
+                # We need to fetch original odds to calculate individual stakes
+                # For now, we use a simplified approach since we don't store individual odds in ArbOpportunity
+                # This is a placeholder for actual multi-leg placement logic
+                logger.warning("[%s] Double Chance execution is not fully atomic!", arb_id)
+                # Fallback to single bet for now or implement multi-bet logic
+                ps_status = "REJECTED"
+                result = {"status": "DOUBLE_CHANCE_UNSUPPORTED_IN_LIVE", "stake": 0}
+            else:
+                result = await ps_client.place_bet(
+                    event_id=arb.ps3838_event_id, period=arb.ps3838_period,
+                    bet_type=arb.ps3838_bet_type, outcome=arb.ps3838_outcome,
+                    price=arb.ps3838_odds, stake=adjusted_ps_stake, unique_id=arb_id,
+                    sport_id=arb.ps3838_sport_id
+                )
             placed_stake = result.get("stake", 0) or 0
             placed_price = result.get("price", arb.ps3838_odds)
             ps_status    = result.get("status", "UNKNOWN")
@@ -220,7 +244,12 @@ async def execute_arb(
 
     # ── Net P&L estimate ─────────────────────────────────────────────────────
     k_gross_payout = kalshi_leg.filled * 1.0
-    k_fee          = kalshi_taker_fee(int(kalshi_leg.filled), kalshi_leg.avg_price)
+    if platform == "polymarket":
+        from .stake_calc import polymarket_taker_fee
+        k_fee = polymarket_taker_fee(int(kalshi_leg.filled), kalshi_leg.avg_price)
+    else:
+        k_fee = kalshi_taker_fee(int(kalshi_leg.filled), kalshi_leg.avg_price)
+
     k_net_payout   = k_gross_payout - k_fee
     ps_payout      = ps_leg.filled * arb.ps3838_odds
 

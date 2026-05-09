@@ -199,11 +199,20 @@ def find_best_kalshi_match(
     ps_away: str,
     kalshi_events: list,
     min_score: float = 0.35,
+    ps_league: str = "",
 ) -> Optional[dict]:
     best_score = min_score
     best_event = None
 
     for event in kalshi_events:
+        # League check (simple heuristic)
+        if ps_league:
+            k_title = event.get('title', '').lower()
+            ps_l_lower = ps_league.lower()
+            # If leagues are clearly different (e.g. NBA vs WNBA, EPL vs Championship)
+            if "nba" in ps_l_lower and "wnba" in k_title: continue
+            if "wnba" in ps_l_lower and "nba" in k_title and "wnba" not in k_title: continue
+
         combined = f"{event.get('title', '')} {event.get('sub_title', '')}"
         score = _score(ps_home, ps_away, combined)
         if score > best_score:
