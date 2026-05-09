@@ -20,7 +20,10 @@ SPORTS_TO_MONITOR = [29, 4, 33, 3]
 MIN_ARB_PROFIT_PCT = 0.5
 
 # Poll interval for PS3838 in seconds
-PS3838_POLL_INTERVAL = 2
+# New strict limit: 120s per sport per endpoint.
+# We will use deltas (since parameter) to avoid 429s,
+# but still increase interval to be safe.
+PS3838_POLL_INTERVAL = 10
 
 # DRY_RUN=true  — только логируем, ничего не ставим
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"

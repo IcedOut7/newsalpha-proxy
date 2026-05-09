@@ -8,6 +8,7 @@ class ArbOpportunity:
     event_name: str
     ps3838_event_id: int
     ps3838_sport_id: int
+    ps3838_line_id: int
     kalshi_ticker: str
     ps3838_outcome: str      # "home" | "away" | "draw" | "over" | "under"
     ps3838_odds: float       # decimal
@@ -33,6 +34,7 @@ def detect_arb(
     event_name: str,
     ps3838_event_id: int,
     ps3838_sport_id: int,
+    ps3838_line_id: int,
     ps3838_outcome: str,
     ps3838_odds: float,
     ps3838_period: int,
@@ -63,6 +65,7 @@ def detect_arb(
             event_name=event_name,
             ps3838_event_id=ps3838_event_id,
             ps3838_sport_id=ps3838_sport_id,
+            ps3838_line_id=ps3838_line_id,
             kalshi_ticker=kalshi_ticker,
             ps3838_outcome=ps3838_outcome,
             ps3838_odds=ps3838_odds,

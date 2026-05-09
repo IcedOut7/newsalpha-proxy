@@ -77,6 +77,11 @@ async def main():
         iteration = 0
         while True:
             loop_start = asyncio.get_event_loop().time()
+
+            # Staggered sport polling to respect the 120s limit per sport
+            # Instead of polling all sports every loop, we could cycle through them
+            # But with delta updates (since), we might be okay with a slower global interval.
+
             if iteration > 0 and iteration % KALSHI_REFRESH_EVERY == 0:
                 try:
                     kalshi_events = await kalshi.get_all_sports_events()
@@ -91,8 +96,7 @@ async def main():
                 )
 
                 elapsed = (asyncio.get_event_loop().time() - loop_start)
-                if iteration % 5 == 0:
-                    logger.info("Сканирование активно (цикл %.2fs). PS3838 Live Events OK", elapsed)
+                logger.info("Сканирование активно (цикл %.2fs). PS3838 Live Events OK", elapsed)
 
                 if opps:
                     for arb, stakes, ke, k_market in opps:

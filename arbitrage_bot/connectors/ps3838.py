@@ -69,6 +69,34 @@ class PS3838Client:
     async def get_balance(self) -> dict:
         return await self._get("/v1/client/balance")
 
+    async def get_line(
+        self,
+        event_id: int,
+        sport_id: int,
+        league_id: int,
+        period: int,
+        bet_type: str,
+        outcome: str,
+        handicap: float = None,
+    ) -> dict:
+        params = {
+            "sportId": sport_id,
+            "leagueId": league_id,
+            "eventId": event_id,
+            "periodNumber": period,
+            "betType": bet_type.upper(),
+            "oddsFormat": "Decimal",
+        }
+        if outcome.lower() in ("over", "under"):
+            params["side"] = outcome.upper()
+        else:
+            params["team"] = outcome.upper()
+
+        if handicap is not None:
+            params["handicap"] = handicap
+
+        return await self._get("/v1/line", params)
+
     async def place_bet(
         self,
         event_id: int,
@@ -78,49 +106,84 @@ class PS3838Client:
         price: float,        # decimal odds
         stake: float,        # dollar amount
         unique_id: str,
-        sport_id: int = None, # Added sport_id
+        line_id: int,
+        sport_id: int = None,
         accept_better_line: bool = False,
     ) -> dict:
-        fill = {
-            "sportId": sport_id, # Fixed: now passing sport_id instead of None
-            "eventId": event_id,
-            "periodNumber": period,
-            "betType": bet_type,
-            "team": outcome,
-            "price": price,
-            "stake": round(stake, 2),
-        }
+        # Standard Pinnacle Straight Bet Schema
         body = {
             "uniqueRequestId": unique_id,
             "acceptBetterLine": accept_better_line,
             "oddsFormat": "Decimal",
-            "fills": [fill],
+            "stake": round(stake, 2),
+            "winRiskStake": "RISK",
+            "sportId": sport_id,
+            "eventId": event_id,
+            "periodNumber": period,
+            "betType": bet_type.upper(),
+            "team": outcome.upper() if outcome not in ("over", "under") else None,
+            "side": outcome.upper() if outcome in ("over", "under") else None,
+            "lineId": line_id,
         }
+
+        # Remove None values
+        body = {k: v for k, v in body.items() if v is not None}
+
         async with self.session.post(
-            f"{self.base}/v1/bets", headers=self._headers, json=body
+            f"{self.base}/v1/bets/place", headers=self._headers, json=body
         ) as r:
+            if r.status == 400:
+                error_data = await r.json(content_type=None)
+                logger.error("PS3838 Bet Placement 400 Error: %s", error_data)
+                return {"status": "REJECTED", "error_code": error_data.get("code"), "raw": error_data}
+
             r.raise_for_status()
             resp = await r.json(content_type=None)
-        bets = resp.get("betResponses", [{}])
-        if not bets:
-            return {"status": "NO_RESPONSE", "stake": 0, "price": price}
-        b = bets[0]
-        return {
-            "bet_id": b.get("betId"),
-            "status": b.get("status", "UNKNOWN"),
-            "price": b.get("price", price),
-            "stake": b.get("stake", 0),
-            "error_code": b.get("errorCode"),
-        }
+
+        if resp.get("status") == "ACCEPTED":
+            return {
+                "bet_id": resp.get("betId"),
+                "status": "ACCEPTED",
+                "price": resp.get("price", price),
+                "stake": resp.get("stake", stake),
+            }
+        else:
+            return {
+                "status": resp.get("status", "REJECTED"),
+                "error_code": resp.get("errorCode"),
+                "raw": resp
+            }
 
     async def get_sports(self) -> list:
         data = await self._get("/v3/sports")
         return data.get("sports", [])
 
     async def get_live_odds(self, sport_id: int, max_staleness_sec: int = 15) -> list:
+        # Rate limit tracking (simplistic per-instance)
+        if not hasattr(self, "_last_call"):
+            self._last_call = {}
+        if not hasattr(self, "_last_since"):
+            self._last_since = {}
+
+        now = time.time()
+        last_call_ts = self._last_call.get(sport_id, 0)
+
+        # We enforce at least a 5s delay even for deltas to be safe,
+        # though the new limit is 120s. We'll warn if it's too fast.
+        if now - last_call_ts < 5:
+            return []
+
+        self._last_call[sport_id] = now
+        since = self._last_since.get(sport_id)
+
         async def _fetch_fixtures():
-            data = await self._get("/v3/fixtures", {"sportId": sport_id, "isLive": 1})
+            params = {"sportId": sport_id, "isLive": 1}
+            # Delta Fixtures can be tricky because we need to keep a full state.
+            # For now, we always get full fixtures to avoid complex state management,
+            # but we respect the 120s limit for full snapshots if we can.
+            data = await self._get("/v3/fixtures", params)
             result = {}
+            if not data: return {}
             for league in data.get("league", []):
                 league_name = league.get("name", "")
                 for event in league.get("events", []):
@@ -137,10 +200,12 @@ class PS3838Client:
             return result
 
         async def _fetch_odds():
-            return await self._get("/v3/odds", {"sportId": sport_id, "isLive": 1, "oddsFormat": "Decimal"})
+            params = {"sportId": sport_id, "isLive": 1, "oddsFormat": "Decimal"}
+            if since:
+                params["since"] = since
+            return await self._get("/v3/odds", params)
 
-        # Sequential fetch to ensure odds are consistent with fixtures metadata
-        # (Using gather might occasionally lead to slight sync issues if one takes much longer)
+        # Sequential fetch
         fixtures = await _fetch_fixtures()
         if not fixtures:
             return []
@@ -148,12 +213,11 @@ class PS3838Client:
         if not data:
             return []
 
-        # Staleness Check: Compare data timestamp with local time
-        # The PS3838 API usually returns a last timestamp
-        last = data.get("last")
-        if last:
-            # Simple check: the API should be active
-            logger.debug("PS3838 Sport %d last snapshot ID: %s", sport_id, last)
+        # Update since token for next call
+        new_since = data.get("last")
+        if new_since:
+            self._last_since[sport_id] = new_since
+            logger.debug("PS3838 Sport %d updated since token: %s", sport_id, new_since)
 
         events = []
         for league in data.get("leagues", []):
@@ -171,11 +235,16 @@ class PS3838Client:
                         "moneyline": period.get("moneyline"),
                         "spreads": period.get("spreads", []),
                         "totals": period.get("totals", []),
+                        "line_id": period.get("lineId"), # Main lineId for period (often used for ML)
                         "max_moneyline": period.get("maxMoneyline") or 0,
                         "max_spread":    period.get("maxSpread")    or 0,
                         "max_total":     period.get("maxTotal")     or 0,
                     }
-                    if p["moneyline"] or p["spreads"]:
+
+                    # For Spreads and Totals, the lineId is usually inside each item in the list
+                    # We'll keep them as they are but ensure they are captured
+
+                    if p["moneyline"] or p["spreads"] or p["totals"]:
                         periods.append(p)
 
                 home_name = fixture["home"]

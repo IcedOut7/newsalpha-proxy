@@ -65,11 +65,14 @@ def _is_halftime(event: dict) -> bool:
 
     p_lower = str(period).lower()
     # Broaden detection for various providers
-    ht_markers = {"ht", "halftime", "half time", "half", "intermission", "break", "45"}
+    ht_markers = {"ht", "halftime", "half time", "half", "intermission", "break"}
 
     if sport_id == 29: # Soccer
+        return p_lower in ht_markers or p_lower == "45"
+    if sport_id == 4: # Basketball
+        # period "2" in basketball is the second quarter, not necessarily halftime unless explicitly marked
         return p_lower in ht_markers
-    return p_lower in ht_markers or p_lower == "2"
+    return p_lower in ht_markers
 
 
 def _kalshi_event_date(sub_title: str) -> Optional[datetime]:
@@ -223,6 +226,9 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
         draw_odds = ml.get("draw")
 
         ev_id = ps_event["id"]
+        sport_id = ps_event["sport_id"]
+        sport_name = _guess_sport(sport_id)
+
         fp    = _odds_fingerprint(period)
         odds_changed = _odds_fingerprints.get(ev_id) != fp
         _odds_fingerprints[ev_id] = fp
@@ -240,11 +246,11 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
             matches = []
             for platform, item in candidates:
                 if platform == "kalshi":
-                    if find_best_kalshi_match(home, away, [item], ps_league=league) and _dates_match(item, ps_starts):
+                    if find_best_kalshi_match(home, away, [item], ps_league=league, ps_sport=sport_name) and _dates_match(item, ps_starts):
                         matches.append(("kalshi", item))
                 else: # poly
                     title = item.get("question", "")
-                    if find_best_kalshi_match(home, away, [{"title": title, "sub_title": ""}], min_score=0.45, ps_league=league):
+                    if find_best_kalshi_match(home, away, [{"title": title, "sub_title": ""}], min_score=0.45, ps_league=league, ps_sport=sport_name):
                         matches.append(("poly", item))
             _match_cache[ev_id] = matches
 
@@ -293,6 +299,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                         event_name=f"{home} vs {away} (Poly)",
                         ps3838_event_id=ps_event["id"],
                         ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_line_id=period.get("line_id", 0),
                         ps3838_outcome=ps_outcome,
                         ps3838_odds=ps_odds,
                         ps3838_period=0,
@@ -385,6 +392,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                             event_name=f"{home} vs {away} (K-NO vs PS-WIN)",
                             ps3838_event_id=ps_event["id"],
                             ps3838_sport_id=ps_event["sport_id"],
+                            ps3838_line_id=period.get("line_id", 0),
                             ps3838_outcome=ps_win_outcome,
                             ps3838_odds=ps_win_odds,
                             ps3838_period=0,
@@ -408,6 +416,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                             event_name=f"{home} vs {away} (K-YES vs PS-X2)",
                             ps3838_event_id=ps_event["id"],
                             ps3838_sport_id=ps_event["sport_id"],
+                            ps3838_line_id=period.get("line_id", 0),
                             ps3838_outcome="draw_or_away" if side == "home" else "home_or_draw",
                             ps3838_odds=dc_odds,
                             ps3838_period=0,
@@ -431,6 +440,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                     event_name=f"{home} vs {away}",
                     ps3838_event_id=ps_event["id"],
                     ps3838_sport_id=ps_event["sport_id"],
+                    ps3838_line_id=period.get("line_id", 0),
                     ps3838_outcome=ps_outcome,
                     ps3838_odds=ps_odds,
                     ps3838_period=0,
@@ -451,6 +461,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                     event_name=f"{home} vs {away}",
                     ps3838_event_id=ps_event["id"],
                     ps3838_sport_id=ps_event["sport_id"],
+                    ps3838_line_id=period.get("line_id", 0),
                     ps3838_outcome="draw",
                     ps3838_odds=draw_odds,
                     ps3838_period=0,
@@ -482,6 +493,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                         event_name=f"{home} vs {away} TOTAL {line} UNDER",
                         ps3838_event_id=ps_event["id"],
                         ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_line_id=t.get("lineId", 0),
                         ps3838_outcome="over",
                         ps3838_odds=ps_over_odds,
                         ps3838_period=0,
@@ -513,6 +525,7 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                         event_name=f"{home} vs {away} TOTAL {line}",
                         ps3838_event_id=ps_event["id"],
                         ps3838_sport_id=ps_event["sport_id"],
+                        ps3838_line_id=t.get("lineId", 0),
                         ps3838_outcome="under",
                         ps3838_odds=ps_under_odds,
                         ps3838_period=0,

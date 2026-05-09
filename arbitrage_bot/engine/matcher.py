@@ -157,7 +157,7 @@ def _expand_abbrevs(tokens: set) -> set:
     return expanded
 
 
-def _score(ps_home: str, ps_away: str, kalshi_title: str) -> float:
+def _score(ps_home: str, ps_away: str, kalshi_title: str, ps_sport: str = "") -> float:
     # Check for special tags mismatch (U19, Women, Corners)
     ps_combined = f"{ps_home} {ps_away}".lower()
     k_lower = kalshi_title.lower()
@@ -168,6 +168,14 @@ def _score(ps_home: str, ps_away: str, kalshi_title: str) -> float:
     if ps_tags != k_tags:
         # If one has "women" and the other doesn't, it's a mismatch
         return 0.0
+
+    # Cross-sport detection: if we have a sport, try to filter
+    if ps_sport:
+        ps_s_lower = ps_sport.lower()
+        if ps_s_lower == "basketball" and "mlb" in k_lower: return 0.0
+        if ps_s_lower == "baseball" and "nba" in k_lower: return 0.0
+        # More precise: check for specific team mismatches if we can
+        # (e.g. "Phillies" is baseball, "76ers" is basketball)
 
     k_tokens_raw = _normalize(kalshi_title)
     k_tokens = _expand_abbrevs(k_tokens_raw)
@@ -200,6 +208,7 @@ def find_best_kalshi_match(
     kalshi_events: list,
     min_score: float = 0.35,
     ps_league: str = "",
+    ps_sport: str = "",
 ) -> Optional[dict]:
     best_score = min_score
     best_event = None
@@ -214,7 +223,7 @@ def find_best_kalshi_match(
             if "wnba" in ps_l_lower and "nba" in k_title and "wnba" not in k_title: continue
 
         combined = f"{event.get('title', '')} {event.get('sub_title', '')}"
-        score = _score(ps_home, ps_away, combined)
+        score = _score(ps_home, ps_away, combined, ps_sport=ps_sport)
         if score > best_score:
             best_score = score
             best_event = event

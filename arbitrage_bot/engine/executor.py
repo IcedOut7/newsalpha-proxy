@@ -211,6 +211,7 @@ async def execute_arb(
                     event_id=arb.ps3838_event_id, period=arb.ps3838_period,
                     bet_type=arb.ps3838_bet_type, outcome=arb.ps3838_outcome,
                     price=arb.ps3838_odds, stake=adjusted_ps_stake, unique_id=arb_id,
+                    line_id=arb.ps3838_line_id,
                     sport_id=arb.ps3838_sport_id
                 )
             placed_stake = result.get("stake", 0) or 0
