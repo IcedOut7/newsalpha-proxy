@@ -53,6 +53,8 @@ async def main():
 
         try:
             ps_bal = await ps.get_balance()
+            logger.info("Авторизация PS3838 подтверждена для пользователя %s", PS3838_USERNAME)
+
             k_bal  = await kalshi.get_balance()
             p_bal  = await poly.get_balance()
             logger.info("PS3838 $%.2f | Kalshi $%.2f | Poly $%.2f",

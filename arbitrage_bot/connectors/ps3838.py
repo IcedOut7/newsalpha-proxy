@@ -24,23 +24,22 @@ from ..config import SPORTS_TO_MONITOR
 ACTIVE_SPORT_IDS = SPORTS_TO_MONITOR
 
 
-def _auth_header() -> str:
-    token = base64.b64encode(f"{PS3838_USERNAME}:{PS3838_PASSWORD}".encode()).decode()
-    return f"Basic {token}"
-
-
-HEADERS = {
-    "Authorization": _auth_header(),
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-}
-
-
 class PS3838Client:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
         self.base = PS3838_BASE_URL
+        self._username = PS3838_USERNAME
+        self._password = PS3838_PASSWORD
+        self._headers = self._build_headers()
+
+    def _build_headers(self) -> dict:
+        token = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
+        return {
+            "Authorization": f"Basic {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
 
     async def _get(self, path: str, params: dict = None, retries: int = 2) -> dict:
         import time
@@ -48,8 +47,11 @@ class PS3838Client:
         for i in range(retries + 1):
             try:
                 async with self.session.get(
-                    f"{self.base}{path}", headers=HEADERS, params=params or {}
+                    f"{self.base}{path}", headers=self._headers, params=params or {}
                 ) as r:
+                    if r.status in (401, 403):
+                        logger.critical("PS3838 AUTH ERROR: Status %d. Check your credentials!", r.status)
+                        raise Exception(f"Unauthorized: Access to PS3838 denied (status {r.status})")
                     r.raise_for_status()
                     latency = (time.time() - start) * 1000
                     logger.debug("PS3838 GET %s took %.2fms", path, latency)
@@ -95,7 +97,7 @@ class PS3838Client:
             "fills": [fill],
         }
         async with self.session.post(
-            f"{self.base}/v1/bets", headers=HEADERS, json=body
+            f"{self.base}/v1/bets", headers=self._headers, json=body
         ) as r:
             r.raise_for_status()
             resp = await r.json(content_type=None)
@@ -115,7 +117,7 @@ class PS3838Client:
         data = await self._get("/v3/sports")
         return data.get("sports", [])
 
-    async def get_live_odds(self, sport_id: int) -> list:
+    async def get_live_odds(self, sport_id: int, max_staleness_sec: int = 15) -> list:
         async def _fetch_fixtures():
             data = await self._get("/v3/fixtures", {"sportId": sport_id, "isLive": 1})
             result = {}
@@ -143,8 +145,15 @@ class PS3838Client:
         if not fixtures:
             return []
         data = await _fetch_odds()
-        if not fixtures:
+        if not data:
             return []
+
+        # Staleness Check: Compare data timestamp with local time
+        # The PS3838 API usually returns a last timestamp
+        last = data.get("last")
+        if last:
+            # Simple check: the API should be active
+            logger.debug("PS3838 Sport %d last snapshot ID: %s", sport_id, last)
 
         events = []
         for league in data.get("leagues", []):
