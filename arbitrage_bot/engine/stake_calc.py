@@ -17,13 +17,17 @@ from .arb_detector import ArbOpportunity
 
 
 def kalshi_taker_fee(contracts: int, price: float) -> float:
-    """Kalshi taker fee: ceil(0.07 × C × P × (1-P)), rounded up to cent."""
-    return math.ceil(0.07 * contracts * price * (1.0 - price) * 100) / 100.0
+    """Kalshi taker fee: ceil(0.07 × C × P × (1-P)), rounded up to cent.
+    Note: Minimun fee is often effectively higher due to rounding per contract in some cases,
+    but this is the standard taker formula."""
+    fee = 0.07 * contracts * price * (1.0 - price)
+    return math.ceil(fee * 100) / 100.0
 
 
 def polymarket_taker_fee(contracts: int, price: float) -> float:
     """Polymarket taker fee: 2% of cost (0.02 × C × P), rounded up to cent."""
-    return math.ceil(0.02 * contracts * price * 100) / 100.0
+    fee = 0.02 * contracts * price
+    return math.ceil(fee * 100) / 100.0
 
 
 @dataclass

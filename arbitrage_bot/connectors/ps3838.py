@@ -123,7 +123,12 @@ class PS3838Client:
         async def _fetch_odds():
             return await self._get("/v3/odds", {"sportId": sport_id, "isLive": 1, "oddsFormat": "Decimal"})
 
-        fixtures, data = await asyncio.gather(_fetch_fixtures(), _fetch_odds())
+        # Sequential fetch to ensure odds are consistent with fixtures metadata
+        # (Using gather might occasionally lead to slight sync issues if one takes much longer)
+        fixtures = await _fetch_fixtures()
+        if not fixtures:
+            return []
+        data = await _fetch_odds()
         if not fixtures:
             return []
 

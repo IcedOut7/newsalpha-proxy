@@ -311,16 +311,40 @@ async def scan_once(ps, kalshi_events: list, poly_events: list = None, settings:
                 if side is None:
                     continue
 
+                if is_soccer and draw_odds:
+                    # In soccer, 'Yes' on Kalshi only wins if the team wins.
+                    # Hedging with the other team's moneyline on PS3838 ignores the Draw.
+                    # We MUST use 'No' on Kalshi (covers loss + draw) hedged with 'Win' on PS3838.
+
+                    # 1. Check Arb: Kalshi NO (Team A doesn't win) vs PS3838 Team A Win
+                    # Kalshi NO price = 1.0 - yes_bid
+                    k_no_price = k_market.get("no_ask")
+                    ps_win_outcome, ps_win_odds = ("home", home_odds) if side == "home" else ("away", away_odds)
+
+                    if k_no_price and ps_win_odds:
+                        arb = detect_arb(
+                            event_name=f"{home} vs {away} (K-NO vs PS-WIN)",
+                            ps3838_event_id=ps_event["id"],
+                            ps3838_sport_id=ps_event["sport_id"],
+                            ps3838_outcome=ps_win_outcome,
+                            ps3838_odds=ps_win_odds,
+                            ps3838_period=0,
+                            ps3838_bet_type="moneyline",
+                            kalshi_ticker=k_market["ticker"],
+                            kalshi_side="no",
+                            kalshi_price=k_no_price,
+                        )
+                        if _arb_ok(arb, min_profit, max_profit, min_odds, max_odds):
+                            stakes = calculate_stakes(arb, bankroll, max_ps_stake=max_ml,
+                                                     global_max_stake=max_stake_global)
+                            opportunities.append((arb, stakes, ke, k_market))
+
+                    # Skip the 'Yes' side for soccer ML if draw is not covered
+                    continue
+
                 ps_outcome, ps_odds = ("away", away_odds) if side == "home" else ("home", home_odds)
                 if not ps_odds:
                     continue
-
-                if is_soccer and draw_odds:
-                    imp_draw = 1.0 / draw_odds
-                    imp_k    = k_price
-                    imp_ps   = 1.0 / ps_odds
-                    if imp_k + imp_ps + imp_draw >= 1.0:
-                        continue
 
                 arb = detect_arb(
                     event_name=f"{home} vs {away}",

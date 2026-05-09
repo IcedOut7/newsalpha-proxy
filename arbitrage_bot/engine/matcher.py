@@ -132,6 +132,7 @@ ABBREV_MAP = {
 _STRIP  = re.compile(r"[^a-z0-9 ]")
 _SPACES = re.compile(r"\s+")
 _STOP   = {"vs", "at", "the", "de", "del", "la", "le", "fc", "sc", "bc", "ac"}
+_STRONG_FILTERS = {"u19", "u21", "u23", "women", "corners", "women's", "youth"}
 
 
 def _normalize(name: str) -> set:
@@ -139,6 +140,11 @@ def _normalize(name: str) -> set:
     s = _STRIP.sub(" ", s)
     s = _SPACES.sub(" ", s).strip()
     return {t for t in s.split() if t not in _STOP and len(t) > 1}
+
+
+def _get_special_tags(name: str) -> set:
+    s = name.lower()
+    return {tag for tag in _STRONG_FILTERS if tag in s}
 
 
 def _expand_abbrevs(tokens: set) -> set:
@@ -152,6 +158,17 @@ def _expand_abbrevs(tokens: set) -> set:
 
 
 def _score(ps_home: str, ps_away: str, kalshi_title: str) -> float:
+    # Check for special tags mismatch (U19, Women, Corners)
+    ps_combined = f"{ps_home} {ps_away}".lower()
+    k_lower = kalshi_title.lower()
+
+    ps_tags = _get_special_tags(ps_combined)
+    k_tags = _get_special_tags(k_lower)
+
+    if ps_tags != k_tags:
+        # If one has "women" and the other doesn't, it's a mismatch
+        return 0.0
+
     k_tokens_raw = _normalize(kalshi_title)
     k_tokens = _expand_abbrevs(k_tokens_raw)
     if not k_tokens:
@@ -167,15 +184,10 @@ def _score(ps_home: str, ps_away: str, kalshi_title: str) -> float:
     if not home_overlap or not away_overlap:
         return 0.0
 
-    # Strong match check: at least one token from each side should be a 'strong' identifier
-    # (not just a generic city name if the city has multiple teams)
-    # Actually, _expand_abbrevs already helps by bringing in team names.
-
-    # Avoid matching if home and away overlap with the SAME tokens in Kalshi (shouldn't happen with vs)
+    # Avoid matching if home and away overlap with the SAME tokens in Kalshi
     if home_overlap == away_overlap and len(home_overlap) == 1:
-        # Check if it's just a city name
         token = list(home_overlap)[0]
-        if token in ("new", "york", "los", "angeles", "chicago"):
+        if token in ("new", "york", "los", "angeles", "chicago", "st", "louis"):
             return 0.0
 
     ps_tokens = home_tokens | away_tokens
