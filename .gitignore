@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.pem
+settings.json
+logs/
+*.log
+__pycache__/
+arbitrage_bot/**/__pycache__/
+arbitrage_bot/**/*.pyc
